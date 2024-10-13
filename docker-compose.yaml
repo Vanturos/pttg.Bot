@@ -1,0 +1,79 @@
+version: '3'
+
+services:
+  bot:
+    build: bot
+    container_name: bot_image
+    restart: unless-stopped
+    environment:
+      TOKEN: ${TOKEN}
+      RM_HOST: ${RM_HOST}
+      RM_PORT: ${RM_PORT}
+      RM_USER: ${RM_USER}
+      RM_PASSWORD: ${RM_PASSWORD}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      - db
+    volumes:
+      - postgres_logs:/var/log/postgresql
+
+  db:
+    build: db
+    container_name: db_image
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "listen_addresses=*"
+      - "-c"
+      - "unix_socket_directories=/var/run/postgresql"
+      - "-c"
+      - "log_replication_commands=on"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "wal_level=replica"
+      - "-c"
+      - "wal_log_hints=on"
+      - "-c"
+      - "password_encryption=scram-sha-256"
+      - "-c"
+      - "logging_collector=on"
+      - "-c"
+      - "log_directory=/var/log/postgresql"
+      - "-c"
+      - "log_filename=postgresql-15-main.log"
+    env_file:
+      - .env
+    ports:
+      - ${DB_PORT}:5432
+    volumes:
+      - postgres_logs:/var/log/postgresql
+
+  db_repl:
+    build: db_repl
+    container_name: db_repl_image
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      POSTGRES_USER: ${DB_REPL_USER}
+      POSTGRES_PASSWORD: ${DB_REPL_PASSWORD}
+    env_file:
+      - .env
+    ports:
+      - ${DB_REPL_PORT}:5432
+    volumes:
+      - postgres_logs:/var/log/postgresql
+
+volumes:
+    postgres_logs:

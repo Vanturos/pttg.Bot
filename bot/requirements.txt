@@ -1,0 +1,4 @@
+python-telegram-bot==13.7
+psycopg2==2.9.9
+paramiko==3.5.0
+python-dotenv==1.0.1
