@@ -1,0 +1,218 @@
+- hosts: bot
+  vars_files:
+    - env.yml
+  gather_facts: yes
+  become: yes
+  tasks:
+    - name: "Clone the Bot Repository"
+      git:
+        repo: https://github.com/Vanturos/pttg.Bot.git
+        version: docker
+        clone: yes
+        force: yes
+        update: yes
+        dest: /tmp/cloned_bot/
+    - name: "Create Application Directory"
+      ansible.builtin.file:
+        state: directory
+        path: /usr/src/application/
+    - name: "Move Cloned Bot to Application Directory"
+      command: cp -rf /tmp/cloned_bot/bot/ /usr/src/
+    - name: "Install Required Packages"
+      apt:
+        state: present
+        name:
+          - postgresql-contrib
+          - postgresql-common
+          - python3
+          - python3-dev
+          - python3-pip
+          - jq
+          - libpq-dev
+    - name: "Install Python Dependencies"
+      pip:
+        requirements: /usr/src/bot/requirements.txt
+        extra_args: --break-system-packages
+    - name: "Create Environment File"
+      shell: touch /usr/src/application/.env && chmod 0777 /usr/src/application/.env
+    - name: "Clean Up Cloned Files"
+      shell: /bin/rm -rf /tmp/cloned_bot/
+
+- hosts: db
+  vars:
+    allow_world_readable_tmpfiles: true
+  vars_files:
+    - env.yml
+  gather_facts: yes
+  become: yes
+  tasks:
+    - name: "Install PostgreSQL and Dependencies"
+      apt:
+        state: present
+        name:
+          - postgresql
+          - postgresql-contrib
+          - python3
+          - python3-pip
+          - acl
+          - libpq-dev
+    - name: "Install psycopg2 for PostgreSQL"
+      pip:
+        name: psycopg2-binary
+        extra_args: --break-system-packages
+    - name: "Remove Externally Managed Directory"
+      ansible.builtin.file:
+        state: absent
+        path: /usr/lib/python3.11/EXTERNALLY-MANAGED
+    - name: "Stop PostgreSQL Service"
+      service:
+        name: "{{ item }}"
+        state: stopped
+      with_items:
+        - postgresql
+    - name: "Start and Enable PostgreSQL Service"
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      with_items:
+        - postgresql
+    - name: "Deploy pg_hba Configuration"
+      copy:
+        dest: /etc/postgresql/15/main/pg_hba.conf
+        src: ./pg_hba.conf
+    - name: "Insert Host Entry for Database Access"
+      ansible.builtin.lineinfile:
+        line: "host all all {{ BOT_HOST }}/24 password"
+        path: /etc/postgresql/15/main/pg_hba.conf
+    - name: "Insert Replication Host Entry"
+      ansible.builtin.lineinfile:
+        line: "host replication {{ DB_REPL_USER }} {{ DB_REPL_HOST }}/24 scram-sha-256"
+        path: /etc/postgresql/15/main/pg_hba.conf
+    - name: "Deploy PostgreSQL Configuration"
+      copy:
+        dest: /etc/postgresql/15/main/postgresql.conf
+        src: ./config-postgresql
+    - name: "Create PostgreSQL Database"
+      become_user: postgres
+      become: yes
+      postgresql_db:
+        name: "{{ DB_DATABASE }}"
+        state: present
+    - name: "Create Phones Table"
+      become: yes
+      become_user: postgres
+      postgresql_table:
+        table: "phones"
+        db: "{{ DB_DATABASE }}"
+        columns:
+        - ID SERIAL PRIMARY KEY
+        - phone VARCHAR(25) NOT NULL
+    - name: "Create Emails Table"
+      become: yes
+      become_user: postgres
+      postgresql_table:
+        table: "emails"
+        db: "{{ DB_DATABASE }}"
+        columns:
+        - ID SERIAL PRIMARY KEY
+        - email VARCHAR(255) NOT NULL
+    - name: "Create Database User"
+      become: yes
+      become_user: postgres
+      postgresql_user:
+        name: "{{ DB_USER }}"
+        password: "{{ DB_PASSWORD }}"
+        state: present
+    - name: "Create Replication User"
+      become: yes
+      become_user: postgres
+      postgresql_user:
+        name: "{{ DB_REPL_USER }}"
+        password: "{{ DB_REPL_PASSWORD }}"
+        role_attr_flags: "REPLICATION"
+    - name: "Grant Database Privileges"
+      become: yes
+      become_user: postgres
+      postgresql_privs:
+        type: database
+        privs: all
+        grant_option: no
+        database: "{{ DB_DATABASE }}"
+        roles: "{{ DB_USER }}"
+    - name: "Create Archive Directory for PostgreSQL"
+      file:
+        owner: postgres
+        group: postgres
+        state: directory
+        recurse: yes
+        path: /oracle/pg_data/archive
+    - name: "PostgreSQL Configuration Complete"
+      ansible.builtin.debug:
+        msg: "PostgreSQL setup complete."
+
+- hosts: db_repl
+  vars_files:
+    - env.yml
+  gather_facts: yes
+  become: yes
+  tasks:
+    - name: "Install PostgreSQL for Replication"
+      apt:
+        state: present
+        name:
+          - postgresql
+          - postgresql-contrib
+          - python3
+    - name: "Stop Replication PostgreSQL Service"
+      service:
+        name: "{{ item }}"
+        state: stopped
+      with_items:
+        - postgresql
+    - name: "Remove Existing PostgreSQL Configuration"
+      shell: /bin/rm -rf /etc/postgresql/15/main/*
+    - name: "Copy .pgpass File for Database Authentication"
+      copy:
+        mode: '0600'
+        dest: /var/lib/postgresql/.pgpass
+        src: ./pgpass
+        group: postgres
+        owner: postgres
+    - name: "Remove Existing PostgreSQL Data Directory"
+      become: true
+      become_user: postgres
+      command: rm -rf /var/lib/postgresql/{{ POSTGRES_VERSION  }}/
+    - name: "Perform Base Backup for Replication"
+      become: true
+      become_user: postgres
+      command: pg_basebackup -h {{ DB_HOST }} -D /var/lib/postgresql/{{ POSTGRES_VERSION }}/main/ -p {{ DB_PORT }} -U {{ DB_REPL_USER }} -vP -w
+      environment:
+        PGPASSWORD: "{{ DB_REPL_PASSWORD }}"
+
+    - name: "Replication Configuration Complete"
+      ansible.builtin.debug:
+        msg: "Replication setup complete."
+
+- hosts: bot
+  vars_files:
+    - env.yml
+  gather_facts: yes
+  become: yes
+  tasks:
+    - name: "Notify Bot is Starting"
+      ansible.builtin.debug:
+        msg: "Starting the bot..."
+    - name: "Launch the Bot Application"
+      environment:
+        TOKEN: "{{ TOKEN }}"
+        RM_PORT: "{{ RM_PORT }}"
+        RM_HOST: "{{ RM_HOST }}"
+        RM_USER: "{{ RM_USER }}"
+        RM_PASSWORD: "{{ RM_PASSWORD }}"
+        DB_PORT: "{{ DB_PORT }}"
+        DB_HOST: "{{ DB_HOST }}"
+        DB_NAME: "{{ DB_DATABASE }}"
+        DB_PASSWORD: "{{ DB_PASSWORD }}"
+        DB_USER: "{{ DB_USER }}"
+      command: python3 /usr/src/bot/bot.py
